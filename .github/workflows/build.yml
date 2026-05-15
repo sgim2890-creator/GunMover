@@ -1,0 +1,118 @@
+name: Build GunMover
+
+on:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  BUILD_CONFIGURATION: Release
+  BUILD_PLATFORM: x64
+  VCPKG_TRIPLET: x64-windows-static-md
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    # 1. GunMover를 GunMover/ 폴더에 체크아웃
+    - name: Checkout GunMover
+      uses: actions/checkout@v4
+      with:
+        path: GunMover
+
+    # 2. CommonLibF4를 GunMover 옆에 체크아웃 (jarari의 CMakeLists.txt가 ../CommonLibF4 참조)
+    - name: Checkout CommonLibF4
+      uses: actions/checkout@v4
+      with:
+        repository: Ryan-rsm-McKenzie/CommonLibF4
+        path: CommonLibF4
+
+    # 3. CommonLibF4에서 비-필수 서브디렉토리 제거 (mmio, robin_hood 의존성 문제 방지)
+    - name: Prepare CommonLibF4
+      shell: pwsh
+      run: |
+        $cmakePath = "CommonLibF4/CMakeLists.txt"
+        $content = Get-Content $cmakePath
+        $modified = @()
+        $removedCount = 0
+
+        foreach ($line in $content) {
+          if ($line -match '^\s*add_subdirectory\s*\(\s*src\s*\)') {
+            $modified += $line
+            Write-Host "KEEP: $line"
+          }
+          elseif ($line -match '^\s*add_subdirectory\s*\(') {
+            Write-Host "REMOVE: $line"
+            $removedCount++
+          }
+          else {
+            $modified += $line
+          }
+        }
+
+        $modified | Set-Content $cmakePath
+        Write-Host "Removed $removedCount non-essential add_subdirectory calls"
+
+        $foldersToRemove = @("AddressLibDecoder", "AddressLibGen", "tests", "test", "examples", "example")
+        foreach ($folder in $foldersToRemove) {
+          $path = "CommonLibF4/$folder"
+          if (Test-Path $path) {
+            Remove-Item -Recurse -Force $path
+            Write-Host "Removed folder: $folder"
+          }
+        }
+
+    # 4. MSVC 설정
+    - name: Setup MSVC
+      uses: microsoft/setup-msbuild@v2
+
+    # 5. vcpkg 설정
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgJsonGlob: 'GunMover/vcpkg.json'
+        vcpkgGitCommitId: 'c3867e714dd3a51c272826eea77267876517ed99'
+
+    # 6. CMake 구성 (jarari의 원본 구조 그대로)
+    - name: Configure CMake
+      shell: pwsh
+      working-directory: GunMover
+      run: |
+        cmake -B build -S . -A ${{ env.BUILD_PLATFORM }} `
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIGURATION }} `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+          -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
+
+    # 7. 빌드
+    - name: Build GunMover
+      shell: pwsh
+      working-directory: GunMover
+      run: |
+        cmake --build build --config ${{ env.BUILD_CONFIGURATION }}
+
+    # 8. 빌드 결과 확인
+    - name: List build outputs
+      if: always()
+      shell: pwsh
+      run: |
+        Get-ChildItem -Path "GunMover/build" -Recurse -Force | Where-Object { $_.Extension -in @('.dll', '.pdb') }
+
+    # 9. Artifact 업로드
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: GunMover-${{ github.run_id }}
+        path: |
+          GunMover/build/${{ env.BUILD_CONFIGURATION }}/GunMover.dll
+          GunMover/build/${{ env.BUILD_CONFIGURATION }}/GunMover.pdb
+          GunMover/build/Release/GunMover.dll
+          GunMover/build/Release/GunMover.pdb
+        if-no-files-found: warn
+        retention-days: 7
