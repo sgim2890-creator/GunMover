@@ -104,7 +104,6 @@ void Configs::RegisterAdjustmentData(auto a_iter, uint32_t wepFormID, uint32_t o
 	std::bitset<(size_t)REVERT_FLAG::kNumFlags> revertFlags;
 	std::queue<AlternativeAdjustment> alternatives;
 
-	// Extract X, Y, Z values from the iterator
 	for (auto adjustData = a_iter.value().begin(); adjustData != a_iter.value().end(); ++adjustData) {
 		if (adjustData.key() == "X") {
 			x = adjustData.value().get<float>();
@@ -134,6 +133,9 @@ void Configs::RegisterAdjustmentData(auto a_iter, uint32_t wepFormID, uint32_t o
 			revertFlags.set((size_t)REVERT_FLAG::kRevertOnUnequip, adjustData.value().get<bool>());
 		} else if (adjustData.key() == "RevertOnGunDown") {
 			revertFlags.set((size_t)REVERT_FLAG::kRevertOnGunDown, adjustData.value().get<bool>());
+		} else if (adjustData.key() == "Persistent") {
+			// 추가: Persistent 모드 파싱
+			revertFlags.set((size_t)REVERT_FLAG::kPersistent, adjustData.value().get<bool>());
 		} else if (adjustData.key() == "Alternatives") {
 			for (auto altit = adjustData.value().begin(); altit != adjustData.value().end(); ++altit) {
 				float altX = 0, altY = 0, altZ = 0, altRotX = 0, altRotY = 0, altRotZ = 0;
@@ -160,7 +162,6 @@ void Configs::RegisterAdjustmentData(auto a_iter, uint32_t wepFormID, uint32_t o
 	auto wepExistit = adjustDataMap.find(wepFormID);
 	bool succ = false;
 
-	// Check if the weapon exists in the map, insert if not
 	if (wepExistit == adjustDataMap.end()) {
 		std::tie(wepExistit, succ) = adjustDataMap.insert({ wepFormID, {} });
 	} else {
@@ -174,13 +175,12 @@ void Configs::RegisterAdjustmentData(auto a_iter, uint32_t wepFormID, uint32_t o
 		std::string typeStr = "OMOD";
 		if (isKeyword)
 			typeStr = "Keyword";
-		// Check if the OMOD exists, insert if not, else overwrite
 		if (omodExistit == omodMap.end()) {
 			omodMap.insert({ omodFormID, AdjustmentData(x, y, z, rotX, rotY, rotZ, revertFlags, alternatives) });
-			logger::info("Added Weapon {:04X} - {} {:04X} with adjustment data (X: {:.2f}, Y: {:.2f}, Z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}, RevertFlags: {}, Alternatives: {})", wepFormID, typeStr.c_str(), omodFormID, x, y, z, rotX, rotY, rotZ, revertFlags.to_string(), alternatives.size());
+			logger::info("Added Weapon {:04X} - {} {:04X} with adjustment data (X: {:.2f}, Y: {:.2f}, Z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}, RevertFlags: {}, Persistent: {}, Alternatives: {})", wepFormID, typeStr.c_str(), omodFormID, x, y, z, rotX, rotY, rotZ, revertFlags.to_string(), revertFlags.test((size_t)REVERT_FLAG::kPersistent), alternatives.size());
 		} else {
 			omodExistit->second = AdjustmentData(x, y, z, rotX, rotY, rotZ, revertFlags, alternatives);
-			logger::info("Duplicate {} data found for Weapon {:04X} - {} {:04X}. Overwriting with new adjustment data (X: {:.2f}, Y: {:.2f}, Z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}, RevertFlags: {}, Alternatives: {})", typeStr.c_str(), wepFormID, typeStr.c_str(), omodFormID, x, y, z, rotX, rotY, rotZ, revertFlags.to_string(), alternatives.size());
+			logger::info("Duplicate {} data found for Weapon {:04X} - {} {:04X}. Overwriting with new adjustment data (X: {:.2f}, Y: {:.2f}, Z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}, RevertFlags: {}, Persistent: {}, Alternatives: {})", typeStr.c_str(), wepFormID, typeStr.c_str(), omodFormID, x, y, z, rotX, rotY, rotZ, revertFlags.to_string(), revertFlags.test((size_t)REVERT_FLAG::kPersistent), alternatives.size());
 		}
 	} else {
 		logger::error("Insertion failed for Weapon {:04X}", wepFormID);
@@ -192,27 +192,22 @@ void Configs::SetAdjustmentForEquipped()
 	if (!Globals::p || !Globals::p->Get3D())
 		return;
 
-	// Reset adjustment
 	adjustment = &adjustDataMap.at(0xFFFFFFFF).at(0xFFFFFFFF);
 	if (!EditorUI::Window::GetSingleton()->GetShouldDraw()) {
 		Hooks::shouldAdjust = false;
 	}
 	Hooks::cachedProjectileNodeLocal.x = FLT_MAX;
 
-	// Check if inventoryList is valid
 	if (!Globals::p->inventoryList) {
 		logger::warn("Inventory list is null");
 		return;
 	}
 
-	// Loop through all inventory items
 	for (auto& invItem : Globals::p->inventoryList->data) {
-		// Check if the object is a weapon and is equipped
 		if (invItem.object && invItem.object->formType == RE::ENUM_FORM_ID::kWEAP && invItem.stackData && invItem.stackData->IsEquipped()) {
 			auto wep = static_cast<RE::TESObjectWEAP*>(invItem.object);
 			auto wepIt = adjustDataMap.find(wep->formID);
 
-			// Check if weapon exists in the adjustment map
 			if (wepIt != adjustDataMap.end()) {
 				auto instanceData = static_cast<RE::TESObjectWEAP::InstanceData*>(invItem.GetInstanceData(0));
 				bool keywordFound = false;
@@ -223,10 +218,10 @@ void Configs::SetAdjustmentForEquipped()
 						if (keywordIt != wepIt->second.end()) {
 							adjustment = &keywordIt->second;
 							Hooks::shouldAdjust = true;
-							logger::info("Weapon {:04X} Keyword {:04X} x: {:.2f}, y: {:.2f}, z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}",
-								wep->formID, keywordFormID, adjustment->translation.x, adjustment->translation.y, adjustment->translation.z, adjustment->rotation.x / Configs::toRad, adjustment->rotation.y / Configs::toRad, adjustment->rotation.z / Configs::toRad);
+							logger::info("Weapon {:04X} Keyword {:04X} x: {:.2f}, y: {:.2f}, z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}, Persistent: {}",
+								wep->formID, keywordFormID, adjustment->translation.x, adjustment->translation.y, adjustment->translation.z, adjustment->rotation.x / Configs::toRad, adjustment->rotation.y / Configs::toRad, adjustment->rotation.z / Configs::toRad, adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent));
 							keywordFound = true;
-							break;  // Stop once we find the keyword
+							break;
 						}
 					}
 				}
@@ -235,32 +230,27 @@ void Configs::SetAdjustmentForEquipped()
 				}
 
 				auto extra = invItem.stackData->extra;
-				// Check if extra data is present
 				if (extra) {
 					auto extraData = static_cast<RE::BGSObjectInstanceExtra*>(extra->GetByType(RE::EXTRA_DATA_TYPE::kObjectInstance));
 
-					// Ensure extra data exists and has values
 					if (extraData && extraData->values && extraData->values->buffer) {
 						uintptr_t buf = reinterpret_cast<uintptr_t>(extraData->values->buffer);
 						bool omodFound = false;
 
-						// Iterate over the buffer data to find OMOD
 						for (uint32_t i = 0; i < extraData->values->size / 0x8; ++i) {
 							uint32_t omodFormID = *reinterpret_cast<uint32_t*>(buf + i * 0x8);
 							auto omodIt = wepIt->second.find(omodFormID);
 
-							// If OMOD exists, set the adjustment data
 							if (omodIt != wepIt->second.end()) {
 								adjustment = &omodIt->second;
 								Hooks::shouldAdjust = true;
-								logger::info("Weapon {:04X} OMOD {:04X} x: {:.2f}, y: {:.2f}, z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}", 
-									wep->formID, omodFormID, adjustment->translation.x, adjustment->translation.y, adjustment->translation.z, adjustment->rotation.x / Configs::toRad, adjustment->rotation.y / Configs::toRad, adjustment->rotation.z / Configs::toRad);
+								logger::info("Weapon {:04X} OMOD {:04X} x: {:.2f}, y: {:.2f}, z: {:.2f}, rotX: {:.2f}, rotY: {:.2f}, rotZ: {:.2f}, Persistent: {}", 
+									wep->formID, omodFormID, adjustment->translation.x, adjustment->translation.y, adjustment->translation.z, adjustment->rotation.x / Configs::toRad, adjustment->rotation.y / Configs::toRad, adjustment->rotation.z / Configs::toRad, adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent));
 								omodFound = true;
-								break;  // Stop once we find the OMOD
+								break;
 							}
 						}
 
-						// Log warning if no OMOD found
 						if (!omodFound) {
 							logger::info("No matching OMOD found for weapon {:04X}", wep->formID);
 						} else {
