@@ -1,334 +1,237 @@
+#include "EditorUI.h"
+#include <d3d11.h>
+#include <imgui/imgui.h>
+#include <imgui/imgui_impl_dx11.h>
+#include <imgui/imgui_impl_win32.h>
+#include <windowsx.h>
+#include <wrl.h>
+#include <Configs.h>
+#include <fstream>
+#include <nlohmann/json.hpp>
+#include <Hooks.h>
+#include <Utils.h>
+#include <Globals.h>
+
+EditorUI::Hotkey editorHotkey;
+EditorUI::Hotkey altPosHotkey;
+std::string iniSection = "GMHotkey";
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND a_hWnd, UINT a_msg, WPARAM a_wParam, LPARAM a_lParam);
+
+extern float easePercentage, currentTime, duration;
+extern std::string clipName, animationInfo;
+
 namespace EditorUI
 {
-	void HookD3D11();
+	bool Window::imguiInitialized = false;
+	Window* Window::instance = nullptr;
 
-	struct Hotkey
+	REL::Relocation<uintptr_t> ptr_D3D11CreateDeviceAndSwapChainCall{ REL::ID(224250), 0x419 };
+	REL::Relocation<uintptr_t> ptr_D3D11CreateDeviceAndSwapChain{ REL::ID(254484) };
+	typedef HRESULT (*FnD3D11CreateDeviceAndSwapChain)(IDXGIAdapter*,
+		D3D_DRIVER_TYPE,
+		HMODULE, UINT,
+		const D3D_FEATURE_LEVEL*,
+		UINT,
+		UINT,
+		const DXGI_SWAP_CHAIN_DESC*,
+		IDXGISwapChain**,
+		ID3D11Device**,
+		D3D_FEATURE_LEVEL*,
+		ID3D11DeviceContext**);
+	FnD3D11CreateDeviceAndSwapChain D3D11CreateDeviceAndSwapChain_Orig;
+	typedef HRESULT (*FnD3D11Present)(IDXGISwapChain*, UINT, UINT);
+	FnD3D11Present D3D11Present_Orig;
+	REL::Relocation<uintptr_t> ptr_ClipCursor{ REL::ID(641385) };
+	typedef BOOL (*FnClipCursor)(const RECT*);
+	FnClipCursor ClipCursor_Orig;
+	WNDPROC WndProc_Orig;
+
+	static float tempX = 0.f;
+	static float tempY = 0.f;
+	static float tempZ = 0.f;
+	static float tempRotX = 0.f;
+	static float tempRotY = 0.f;
+	static float tempRotZ = 0.f;
+	static bool tempRevertOnReload = false;
+	static bool tempRevertOnMelee = false;
+	static bool tempRevertOnThrow = false;
+	static bool tempRevertOnSprint = false;
+	static bool tempRevertOnEquip = false;
+	static bool tempRevertOnFastEquip = false;
+	static bool tempRevertOnUnequip = false;
+	static bool tempRevertOnGunDown = false;
+	static bool tempPersistent = false;  // 추가: Persistent 모드 임시 변수
+
+	void SyncValues()
 	{
-		int mainKey = 0;  // Main key (e.g., 'A', 'X', etc.)
-		bool ctrl = false;
-		bool shift = false;
-		bool alt = false;
-		short captureState = 0;
+		if (Configs::adjustment) {
+			tempX = Configs::adjustment->translation.x;
+			tempY = Configs::adjustment->translation.y;
+			tempZ = Configs::adjustment->translation.z;
+			tempRotX = Configs::adjustment->rotation.x / Configs::toRad;
+			tempRotY = Configs::adjustment->rotation.y / Configs::toRad;
+			tempRotZ = Configs::adjustment->rotation.z / Configs::toRad;
+			tempRevertOnReload = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnReload);
+			tempRevertOnMelee = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnMelee);
+			tempRevertOnThrow = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnThrow);
+			tempRevertOnSprint = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnSprint);
+			tempRevertOnEquip = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnEquip);
+			tempRevertOnFastEquip = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnFastEquip);
+			tempRevertOnUnequip = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnUnequip);
+			tempRevertOnGunDown = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnGunDown);
+			tempPersistent = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent);  // 추가
+		}
+	}
 
-		// Custom serialization for ini file
-		std::string ToString() const
-		{
-			return std::to_string(mainKey) + "," + (ctrl ? "1" : "0") + "," + (shift ? "1" : "0") + "," + (alt ? "1" : "0");
+	RECT windowRect;
+	ImGuiIO imguiIO;
+	Microsoft::WRL::ComPtr<IDXGISwapChain> d3d11SwapChain;
+	Microsoft::WRL::ComPtr<ID3D11Device> d3d11Device;
+	Microsoft::WRL::ComPtr<ID3D11DeviceContext> d3d11Context;
+	HWND window;
+
+	BOOL __stdcall HookedClipCursor(const RECT* lpRect)
+	{
+		if (Window::GetSingleton() && Window::GetSingleton()->GetShouldDraw())
+			lpRect = &windowRect;
+		return ClipCursor_Orig(lpRect);
+	}
+
+	LRESULT __stdcall WndProcHandler(HWND a_hWnd, UINT a_msg, WPARAM a_wParam, LPARAM a_lParam)
+	{
+		switch (a_msg) {
+		case WM_KEYDOWN:
+			if (editorHotkey.captureState == 0 && altPosHotkey.captureState == 0) {
+				bool isPressed = (a_lParam & 0x40000000) == 0x0;
+				if (isPressed) {
+					bool ctrlPressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+					bool shiftPressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+					bool altPressed = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+
+					if (a_wParam == editorHotkey.mainKey &&
+						ctrlPressed == editorHotkey.ctrl &&
+						shiftPressed == editorHotkey.shift &&
+						altPressed == editorHotkey.alt) {
+						if (auto singleton = Window::GetSingleton()) {
+							singleton->ToggleEditorUI();
+						}
+					} else if (a_wParam == altPosHotkey.mainKey &&
+							   ctrlPressed == altPosHotkey.ctrl &&
+							   shiftPressed == altPosHotkey.shift &&
+							   altPressed == altPosHotkey.alt &&
+							   Configs::adjustment) {
+						Configs::adjustment->CycleAlternatives();
+					}
+				}
+			}
+			break;
 		}
 
-		std::string GetKeyName(int virtualKey) const
-		{
-			switch (virtualKey) {
-			case 0x20:
-				return "Space";
-			case 0x21:
-				return "Page Up";
-			case 0x22:
-				return "Page Down";
-			case 0x23:
-				return "End";
-			case 0x24:
-				return "Home";
-			case 0x25:
-				return "Left Arrow";
-			case 0x26:
-				return "Up Arrow";
-			case 0x27:
-				return "Right Arrow";
-			case 0x28:
-				return "Down Arrow";
-			case 0x29:
-				return "Select";
-			case 0x2A:
-				return "Print";
-			case 0x2B:
-				return "Execute";
-			case 0x2C:
-				return "Print Screen";
-			case 0x2D:
-				return "Insert";
-			case 0x2E:
-				return "Delete";
-			case 0x2F:
-				return "Help";
-			case 0x30:
-				return "0";
-			case 0x31:
-				return "1";
-			case 0x32:
-				return "2";
-			case 0x33:
-				return "3";
-			case 0x34:
-				return "4";
-			case 0x35:
-				return "5";
-			case 0x36:
-				return "6";
-			case 0x37:
-				return "7";
-			case 0x38:
-				return "8";
-			case 0x39:
-				return "9";
-			case 0x41:
-				return "A";
-			case 0x42:
-				return "B";
-			case 0x43:
-				return "C";
-			case 0x44:
-				return "D";
-			case 0x45:
-				return "E";
-			case 0x46:
-				return "F";
-			case 0x47:
-				return "G";
-			case 0x48:
-				return "H";
-			case 0x49:
-				return "I";
-			case 0x4A:
-				return "J";
-			case 0x4B:
-				return "K";
-			case 0x4C:
-				return "L";
-			case 0x4D:
-				return "M";
-			case 0x4E:
-				return "N";
-			case 0x4F:
-				return "O";
-			case 0x50:
-				return "P";
-			case 0x51:
-				return "Q";
-			case 0x52:
-				return "R";
-			case 0x53:
-				return "S";
-			case 0x54:
-				return "T";
-			case 0x55:
-				return "U";
-			case 0x56:
-				return "V";
-			case 0x57:
-				return "W";
-			case 0x58:
-				return "X";
-			case 0x59:
-				return "Y";
-			case 0x5A:
-				return "Z";
-			case 0x5B:
-				return "Left Windows";
-			case 0x5C:
-				return "Right Windows";
-			case 0x5D:
-				return "Applications";
-			case 0x5F:
-				return "Sleep";
-			case 0x60:
-				return "Numpad 0";
-			case 0x61:
-				return "Numpad 1";
-			case 0x62:
-				return "Numpad 2";
-			case 0x63:
-				return "Numpad 3";
-			case 0x64:
-				return "Numpad 4";
-			case 0x65:
-				return "Numpad 5";
-			case 0x66:
-				return "Numpad 6";
-			case 0x67:
-				return "Numpad 7";
-			case 0x68:
-				return "Numpad 8";
-			case 0x69:
-				return "Numpad 9";
-			case 0x6A:
-				return "Numpad Multiply";
-			case 0x6B:
-				return "Numpad Add";
-			case 0x6C:
-				return "Numpad Separator";
-			case 0x6D:
-				return "Numpad Subtract";
-			case 0x6E:
-				return "Numpad Decimal";
-			case 0x6F:
-				return "Numpad Divide";
-			case 0x70:
-				return "F1";
-			case 0x71:
-				return "F2";
-			case 0x72:
-				return "F3";
-			case 0x73:
-				return "F4";
-			case 0x74:
-				return "F5";
-			case 0x75:
-				return "F6";
-			case 0x76:
-				return "F7";
-			case 0x77:
-				return "F8";
-			case 0x78:
-				return "F9";
-			case 0x79:
-				return "F10";
-			case 0x7A:
-				return "F11";
-			case 0x7B:
-				return "F12";
-			case 0x7C:
-				return "F13";
-			case 0x7D:
-				return "F14";
-			case 0x7E:
-				return "F15";
-			case 0x7F:
-				return "F16";
-			case 0x80:
-				return "F17";
-			case 0x81:
-				return "F18";
-			case 0x82:
-				return "F19";
-			case 0x83:
-				return "F20";
-			case 0x84:
-				return "F21";
-			case 0x85:
-				return "F22";
-			case 0x86:
-				return "F23";
-			case 0x87:
-				return "F24";
-			case 0x90:
-				return "Num Lock";
-			case 0x91:
-				return "Scroll Lock";
-			case 0xA0:
-				return "Left Shift";
-			case 0xA1:
-				return "Right Shift";
-			case 0xA2:
-				return "Left Control";
-			case 0xA3:
-				return "Right Control";
-			case 0xA4:
-				return "Left Alt";
-			case 0xA5:
-				return "Right Alt";
-			case 0xBA:
-				return ";";
-			case 0xBB:
-				return "=";
-			case 0xBC:
-				return ",";
-			case 0xBD:
-				return "-";
-			case 0xBE:
-				return ".";
-			case 0xBF:
-				return "/";
-			case 0xC0:
-				return "`";
-			case 0xDB:
-				return "[";
-			case 0xDC:
-				return "\\";
-			case 0xDD:
-				return "]";
-			case 0xDE:
-				return "'";
-			case 0xDF:
-				return "OEM_8";
-			default:
-				return "Unknown";
+		if (Window::GetSingleton() && Window::GetSingleton()->GetShouldDraw()) {
+			ImGui_ImplWin32_WndProcHandler(a_hWnd, a_msg, a_wParam, a_lParam);
+			return true;
+		}
+
+		return CallWindowProc(WndProc_Orig, a_hWnd, a_msg, a_wParam, a_lParam);
+	}
+
+	HRESULT __stdcall HookedPresent(IDXGISwapChain* a_swapChain, UINT a_syncInterval, UINT a_flags)
+	{
+		if (Window::GetSingleton()) {
+			if (!Window::imguiInitialized) {
+				Window::ImGuiInit();
+			}
+
+			ImGui_ImplDX11_NewFrame();
+			ImGui_ImplWin32_NewFrame();
+
+			ImGui::NewFrame();
+
+			Window::GetSingleton()->Draw();
+
+			ImGui::Render();
+			ImGui::EndFrame();
+
+			auto* drawData = ImGui::GetDrawData();
+			if (drawData) {
+				ImGui_ImplDX11_RenderDrawData(drawData);
 			}
 		}
 
-		std::string ToReadableString() const
-		{
-			std::string hotkeyStr;
+		return D3D11Present_Orig(a_swapChain, a_syncInterval, a_flags);
+	}
 
-			if (ctrl)
-				hotkeyStr += "Ctrl + ";
-			if (shift)
-				hotkeyStr += "Shift + ";
-			if (alt)
-				hotkeyStr += "Alt + ";
+	HRESULT __stdcall HookedD3D11CreateDeviceAndSwapChain(IDXGIAdapter* a_pAdapter,
+		D3D_DRIVER_TYPE a_driverType,
+		HMODULE a_software,
+		UINT a_flags,
+		const D3D_FEATURE_LEVEL* a_pFeatureLevels,
+		UINT a_featureLevels,
+		UINT a_sdkVersion,
+		const DXGI_SWAP_CHAIN_DESC* a_pSwapChainDesc,
+		IDXGISwapChain** a_ppSwapChain,
+		ID3D11Device** a_ppDevice,
+		D3D_FEATURE_LEVEL* a_pFeatureLevel,
+		ID3D11DeviceContext** a_ppImmediateContext)
 
-			hotkeyStr += (mainKey != 0) ? GetKeyName(mainKey) : "None";
-
-			return hotkeyStr;
-		}
-
-		static void SaveHotkeyToIni();
-		static void CaptureHotkey(Hotkey& hotkey);
-		static void LoadHotkeyFromIni();
-
-		// Deserialize from ini format
-		static Hotkey FromString(const std::string& str)
-		{
-			Hotkey hotkey;
-			std::stringstream ss(str);
-			char delimiter;
-
-			// Parse the mainKey, ctrl, shift, and alt from the string
-			ss >> hotkey.mainKey >> delimiter >> hotkey.ctrl >> delimiter >> hotkey.shift >> delimiter >> hotkey.alt;
-
-			return hotkey;
-		}
-
-		// Check if a hotkey matches the current key state
-		bool MatchesCurrentState() const
-		{
-			return (GetAsyncKeyState(mainKey) & 0x8000) &&
-			       (!ctrl || (GetAsyncKeyState(VK_CONTROL) & 0x8000)) &&
-			       (!shift || (GetAsyncKeyState(VK_SHIFT) & 0x8000)) &&
-			       (!alt || (GetAsyncKeyState(VK_MENU) & 0x8000));
-		}
-	};
-
-	class Window
 	{
-	protected:
-		static Window* instance;
-		bool shouldDraw = false;
-		void HelpTooltip(const char* a_desc);
+		HRESULT res = D3D11CreateDeviceAndSwapChain_Orig(a_pAdapter, a_driverType, a_software, a_flags, a_pFeatureLevels, a_featureLevels, a_sdkVersion, a_pSwapChainDesc, a_ppSwapChain, a_ppDevice, a_pFeatureLevel, a_ppImmediateContext);
 
-	public:
-		static bool imguiInitialized;
-		static void ImGuiInit();
-		Window() = default;
-		Window(Window&) = delete;
-		void operator=(const Window&) = delete;
+		if (res == S_OK) {
+			REL::Relocation<uintptr_t> swapChain_vtbl(*(std::uintptr_t*)(*a_ppSwapChain));
+			D3D11Present_Orig = (FnD3D11Present)swapChain_vtbl.write_vfunc(8, &HookedPresent);
+			logger::warn("D3D11 Device created. SwapChain vtbl {}", swapChain_vtbl.address());
 
-		static Window* GetSingleton()
-		{
-			if (!instance)
-				instance = new Window();
-			return instance;
+			window = ::GetActiveWindow();
+
+			::GetWindowRect(window, &windowRect);
+
+			d3d11SwapChain = *a_ppSwapChain;
+			d3d11Device = *a_ppDevice;
+			d3d11Context = *a_ppImmediateContext;
 		}
 
-		// toggles the ImGui window and the Windows cursor
-		// also use it to reset data between toggles if needed
-		void ToggleEditorUI();
-		// handles the drawing of the ImGui interface
-		void Draw();
+		return res;
+	}
 
-		inline bool GetShouldDraw()
-		{
-			return shouldDraw;
+	void HookD3D11()
+	{
+		logger::warn("Hooking D3D11CreateDeviceAndSwapChain");
+		F4SE::Trampoline& trampoline = F4SE::GetTrampoline();
+		D3D11CreateDeviceAndSwapChain_Orig = (FnD3D11CreateDeviceAndSwapChain)trampoline.write_call<5>(ptr_D3D11CreateDeviceAndSwapChainCall.address(), &HookedD3D11CreateDeviceAndSwapChain);
+
+		ClipCursor_Orig = *(FnClipCursor*)ptr_ClipCursor.address();
+		ptr_ClipCursor.write_vfunc(0, &HookedClipCursor);
+		logger::warn("CreateDevice {:p} ClipCursor {:p}", fmt::ptr(D3D11CreateDeviceAndSwapChain_Orig), fmt::ptr(ClipCursor_Orig));
+	}
+
+	void Hotkey::SaveHotkeyToIni()
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		if (!io.IniFilename)
+			return;
+
+		std::ifstream fileIn(io.IniFilename);
+		std::string fileContent, line;
+		bool sectionFound = false;
+
+		if (fileIn.is_open()) {
+			while (std::getline(fileIn, line)) {
+				if (line == "[" + iniSection + "]") {
+					sectionFound = true;
+					fileContent += "[" + iniSection + "]\n";
+					fileContent += "Hotkey=" + editorHotkey.ToString() + "\n";
+					fileContent += "AltPosHotkey=" + altPosHotkey.ToString() + "\n";
+					while (std::getline(fileIn, line) && !line.empty() && line[0] != '[') {
+					}
+					fileContent += line + "\n";
+				} else {
+					fileContent += line + "\n";
+				}
+			}
+			fileIn.close();
 		}
-	};
-}
+
+		if (!sectionFound) {
+			fileContent += "[" + iniSection](streamdown:incomplete-link)
