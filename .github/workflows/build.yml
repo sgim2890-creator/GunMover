@@ -14,105 +14,139 @@ env:
   BUILD_CONFIGURATION: Release
   BUILD_PLATFORM: x64
   VCPKG_TRIPLET: x64-windows-static-md
+  WORKSPACE: ${{ github.workspace }}
 
 jobs:
   build:
     runs-on: windows-latest
-
+    
     steps:
-    # 1. GunMover를 GunMover/ 폴더에 체크아웃
-    - name: Checkout GunMover
-      uses: actions/checkout@v4
-      with:
-        path: GunMover
-
-    # 2. CommonLibF4를 GunMover 옆에 체크아웃 (jarari의 CMakeLists.txt가 ../CommonLibF4 참조)
-    - name: Checkout CommonLibF4
-      uses: actions/checkout@v4
-      with:
-        repository: Ryan-rsm-McKenzie/CommonLibF4
-        path: CommonLibF4
-
-    # 3. CommonLibF4에서 비-필수 서브디렉토리 제거 (mmio, robin_hood 의존성 문제 방지)
-    - name: Prepare CommonLibF4
-      shell: pwsh
-      run: |
-        $cmakePath = "CommonLibF4/CMakeLists.txt"
-        $content = Get-Content $cmakePath
-        $modified = @()
-        $removedCount = 0
-
-        foreach ($line in $content) {
-          if ($line -match '^\s*add_subdirectory\s*\(\s*src\s*\)') {
-            $modified += $line
-            Write-Host "KEEP: $line"
+      - name: Checkout GunMover
+        uses: actions/checkout@v4
+        with:
+          path: GunMover
+          
+      - name: Checkout CommonLibF4
+        uses: actions/checkout@v4
+        with:
+          repository: Ryan-rsm-McKenzie/CommonLibF4
+          path: CommonLibF4
+          
+      - name: Checkout F4SE SDK
+        uses: actions/checkout@v4
+        with:
+          repository: ianpatt/f4se
+          path: f4se-src
+          
+      - name: Setup F4SE Headers
+        shell: pwsh
+        run: |
+          $workspace = $env:WORKSPACE
+          $destDir = "$workspace\GunMover\src\F4SE"
+          $destCommonDir = "$workspace\GunMover\src\f4se_common"
+          New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $destCommonDir | Out-Null
+          
+          $sourceDir = "$workspace\f4se-src\f4se"
+          $sourceCommonDir = "$workspace\f4se-src\f4se_common"
+          
+          if (Test-Path $sourceDir) {
+            Get-ChildItem -Path $sourceDir -Filter "*.h" -File | ForEach-Object {
+              Copy-Item $_.FullName (Join-Path $destDir $_.Name)
+            }
           }
-          elseif ($line -match '^\s*add_subdirectory\s*\(') {
-            Write-Host "REMOVE: $line"
-            $removedCount++
+          
+          if (Test-Path $sourceCommonDir) {
+            Get-ChildItem -Path $sourceCommonDir -Filter "*.h" -File | ForEach-Object {
+              Copy-Item $_.FullName (Join-Path $destCommonDir $_.Name)
+            }
           }
-          else {
-            $modified += $line
+          
+          $commonHeader = "$destCommonDir\f4se_common.h"
+          if (-not (Test-Path $commonHeader)) {
+            $typeContent = "#ifndef __F4SE_COMMON__`n#define __F4SE_COMMON__`n`n#include <cstdint>`n#include <string>`n`ntypedef uint8_t UInt8;`ntypedef uint16_t UInt16;`ntypedef uint32_t UInt32;`ntypedef uint64_t UInt64;`ntypedef int8_t SInt8;`ntypedef int16_t SInt16;`ntypedef int32_t SInt32;`ntypedef int64_t SInt64;`ntypedef uintptr_t UIntPtr;`ntypedef intptr_t SIntPtr;`ntypedef std::string String;`n`n#endif"
+            Set-Content -Path $commonHeader -Value $typeContent -Encoding UTF8
           }
-        }
-
-        $modified | Set-Content $cmakePath
-        Write-Host "Removed $removedCount non-essential add_subdirectory calls"
-
-        $foldersToRemove = @("AddressLibDecoder", "AddressLibGen", "tests", "test", "examples", "example")
-        foreach ($folder in $foldersToRemove) {
-          $path = "CommonLibF4/$folder"
-          if (Test-Path $path) {
-            Remove-Item -Recurse -Force $path
-            Write-Host "Removed folder: $folder"
+          
+          $f4seHeader = "$destDir\F4SE.h"
+          $f4seContent = "// Auto-generated F4SE.h`n#pragma once`n`n#include `"../f4se_common/f4se_common.h`"`n#include `"GameTypes.h`"`n#include `"GameAPI.h`"`n#include `"GameObjects.h`"`n#include `"GameReferences.h`"`n#include `"GameForms.h`"`n#include `"GameEvents.h`"`n#include `"GameData.h`"`n#include `"GameSettings.h`"`n#include `"GameMemory.h`"`n#include `"GameThreads.h`"`n#include `"GameStreams.h`"`n#include `"GameUtilities.h`"`n#include `"GameInput.h`"`n#include `"GameMenus.h`"`n#include `"GameMessages.h`"`n#include `"GameCamera.h`"`n#include `"GameCustomization.h`"`n#include `"GameWorkshop.h`"`n#include `"GameExtraData.h`"`n#include `"GameFormComponents.h`"`n#include `"GameHandle.h`"`n#include `"GameRTTI.h`"`n#include `"PapyrusArgs.h`"`n#include `"PapyrusVM.h`"`n#include `"PapyrusNativeFunctions.h`"`n#include `"PapyrusObjects.h`"`n#include `"PapyrusValue.h`"`n#include `"ScaleformAPI.h`"`n#include `"ScaleformTypes.h`"`n#include `"ScaleformValue.h`"`n#include `"ScaleformCallbacks.h`"`n#include `"Serialization.h`"`n#include `"PluginAPI.h`"`n#include `"PluginManager.h`"`n#include `"Translation.h`"`n#include `"InputMap.h`""
+          Set-Content -Path $f4seHeader -Value $f4seContent -Encoding UTF8
+          
+      - name: Prepare CommonLibF4
+        shell: pwsh
+        run: |
+          $workspace = $env:WORKSPACE
+          $cmakePath = "$workspace\CommonLibF4\CMakeLists.txt"
+          if (-not (Test-Path $cmakePath)) {
+            Write-Error "CommonLibF4/CMakeLists.txt not found"
+            exit 1
           }
-        }
-
-    # 4. MSVC 설정
-    - name: Setup MSVC
-      uses: microsoft/setup-msbuild@v2
-
-    # 5. vcpkg 설정
-    - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
-      with:
-        vcpkgJsonGlob: 'GunMover/vcpkg.json'
-        vcpkgGitCommitId: 'c3867e714dd3a51c272826eea77267876517ed99'
-
-    # 6. CMake 구성 (jarari의 원본 구조 그대로)
-    - name: Configure CMake
-      shell: pwsh
-      working-directory: GunMover
-      run: |
-        cmake -B build -S . -A ${{ env.BUILD_PLATFORM }} `
-          -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIGURATION }} `
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
-          -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
-
-    # 7. 빌드
-    - name: Build GunMover
-      shell: pwsh
-      working-directory: GunMover
-      run: |
-        cmake --build build --config ${{ env.BUILD_CONFIGURATION }}
-
-    # 8. 빌드 결과 확인
-    - name: List build outputs
-      if: always()
-      shell: pwsh
-      run: |
-        Get-ChildItem -Path "GunMover/build" -Recurse -Force | Where-Object { $_.Extension -in @('.dll', '.pdb') }
-
-    # 9. Artifact 업로드
-    - name: Upload Artifact
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: GunMover-${{ github.run_id }}
-        path: |
-          GunMover/build/${{ env.BUILD_CONFIGURATION }}/GunMover.dll
-          GunMover/build/${{ env.BUILD_CONFIGURATION }}/GunMover.pdb
-          GunMover/build/Release/GunMover.dll
-          GunMover/build/Release/GunMover.pdb
-        if-no-files-found: warn
-        retention-days: 7
+          $content = Get-Content $cmakePath
+          $modified = @()
+          $removedCount = 0
+          foreach ($line in $content) {
+            if ($line -match '^\s*add_subdirectory\s*\(\s*src\s*\)') {
+              $modified += $line
+            } elseif ($line -match '^\s*add_subdirectory\s*\(') {
+              $removedCount++
+            } else {
+              $modified += $line
+            }
+          }
+          $modified | Set-Content $cmakePath
+          $foldersToRemove = @("AddressLibDecoder", "AddressLibGen", "tests", "test", "examples", "example", "docs")
+          foreach ($folder in $foldersToRemove) {
+            $path = "$workspace\CommonLibF4\$folder"
+            if (Test-Path $path) {
+              Remove-Item -Recurse -Force $path
+            }
+          }
+          
+      - name: Setup MSVC
+        uses: microsoft/setup-msbuild@v2
+        
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: 'GunMover/vcpkg.json'
+          vcpkgGitCommitId: 'c3867e714dd3a51c272826eea77267876517ed99'
+          appendedCacheKey: ${{ hashFiles('GunMover/vcpkg.json') }}
+          
+      - name: Patch GunMover CMakeLists.txt
+        shell: pwsh
+        run: |
+          $workspace = $env:WORKSPACE
+          $cmakeFile = "$workspace\GunMover\CMakeLists.txt"
+          if (Test-Path $cmakeFile) {
+            $content = Get-Content $cmakeFile -Raw
+            $content = $content -replace 'CommonLibF4::CommonLibF4', 'CommonLibF4'
+            $content = $content -replace 'nlohmann_json::nlohmann_json', 'nlohmann_json'
+            Set-Content $cmakeFile $content
+            Write-Host "Patched: Fixed target names (CommonLibF4, nlohmann_json)"
+          }
+          
+      - name: Configure CMake
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/GunMover
+        run: |
+          cmake -B build -S . -A ${{ env.BUILD_PLATFORM }} `
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIGURATION }} `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
+            
+      - name: Build GunMover
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/GunMover
+        run: |
+          cmake --build build --config ${{ env.BUILD_CONFIGURATION }}
+          
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GunMover-${{ github.run_id }}
+          path: |
+            build/${{ env.BUILD_CONFIGURATION }}/GunMover.dll
+            build/${{ env.BUILD_CONFIGURATION }}/GunMover.pdb
+          if-no-files-found: warn
+          retention-days: 7
