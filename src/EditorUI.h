@@ -234,4 +234,373 @@ namespace EditorUI
 		}
 
 		if (!sectionFound) {
-			fileContent += "[" + iniSection](streamdown:incomplete-link)
+			fileContent += "[" + iniSection + "]\n";
+			fileContent += "Hotkey=" + editorHotkey.ToString() + "\n";
+			fileContent += "AltPosHotkey=" + altPosHotkey.ToString() + "\n";
+		}
+
+		std::ofstream fileOut(io.IniFilename);
+		if (fileOut.is_open()) {
+			fileOut << fileContent;
+			fileOut.close();
+		}
+	}
+
+	void Hotkey::LoadHotkeyFromIni()
+	{
+		ImGuiIO& io = ImGui::GetIO();
+		if (!io.IniFilename)
+			return;
+
+		std::ifstream file(io.IniFilename);
+		bool sectionFound = false;
+		if (file.is_open()) {
+			std::string line;
+
+			while (std::getline(file, line)) {
+				if (line == "[" + iniSection + "]") {
+					sectionFound = true;
+				} else if (sectionFound && line.starts_with("Hotkey=")) {
+					editorHotkey = Hotkey::FromString(line.substr(7));
+					logger::info("Editor Hotkey: {}", line.substr(7).c_str());
+				} else if (sectionFound && line.starts_with("AltPosHotkey=")) {
+					altPosHotkey = Hotkey::FromString(line.substr(13));
+					logger::info("Alt Pos Hotkey: {}", line.substr(13).c_str());
+				}
+			}
+			file.close();
+		}
+
+		if (!sectionFound) {
+			editorHotkey.mainKey = 0xDC;
+			editorHotkey.ctrl = false;
+			editorHotkey.shift = false;
+			editorHotkey.alt = false;
+			altPosHotkey.mainKey = 0xBF;
+			altPosHotkey.ctrl = false;
+			altPosHotkey.shift = false;
+			altPosHotkey.alt = false;
+		}
+	}
+
+	void Hotkey::CaptureHotkey(Hotkey& hotkey)
+	{
+		if (hotkey.captureState == 1) {
+			if (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+				hotkey.ctrl = true;
+			else
+				hotkey.ctrl = false;
+			if (GetAsyncKeyState(VK_SHIFT) & 0x8000)
+				hotkey.shift = true;
+			else
+				hotkey.shift = false;
+			if (GetAsyncKeyState(VK_MENU) & 0x8000)
+				hotkey.alt = true;
+			else
+				hotkey.alt = false;
+
+			for (int key = 0x20; key <= 0xDF; ++key) {
+				if (key < 0xA0 || key > 0xA5) {
+					if (GetAsyncKeyState(key) & 0x8000) {
+						hotkey.mainKey = key;
+						SaveHotkeyToIni();
+						hotkey.captureState = 2;
+						break;
+					}
+				}
+			}
+		} else {
+			if (!(GetAsyncKeyState(hotkey.mainKey) & 0x8000)) {
+				hotkey.captureState = 0;
+			}
+		}
+	}
+
+	void Window::HelpTooltip(const char* a_desc)
+	{
+		ImGui::TextDisabled("(?)");
+		if (ImGui::BeginItemTooltip()) {
+			ImGui::PushTextWrapPos(ImGui::GetFontSize() * 35.0f);
+			ImGui::TextUnformatted(a_desc);
+			ImGui::PopTextWrapPos();
+			ImGui::EndTooltip();
+		}
+	}
+
+	void Window::ImGuiInit()
+	{
+		IMGUI_CHECKVERSION();
+
+		DXGI_SWAP_CHAIN_DESC sd;
+		d3d11SwapChain->GetDesc(&sd);
+
+		WndProc_Orig = (WNDPROC)SetWindowLongPtr(sd.OutputWindow, GWLP_WNDPROC, (LONG_PTR)WndProcHandler);
+
+		ImGui::CreateContext();
+		imguiIO = ImGui::GetIO();
+
+		ImGui::StyleColorsDark();
+
+		bool imguiWin32Init = ImGui_ImplWin32_Init(window);
+		bool imguiDX11Init = ImGui_ImplDX11_Init(d3d11Device.Get(), d3d11Context.Get());
+
+		if (imguiWin32Init && imguiDX11Init) {
+			logger::warn("ImGui Init Success");
+
+			Hotkey::LoadHotkeyFromIni();
+		}
+
+		Window::imguiInitialized = true;
+	}
+
+	void Window::ToggleEditorUI()
+	{
+		bool wantDraw = !this->shouldDraw;
+		::ShowCursor(wantDraw);
+		if (wantDraw) {
+			Hooks::shouldAdjust = true;
+			if (!Configs::adjustment) {
+				Configs::adjustDataMap.at(0xFFFFFFFF).at(0xFFFFFFFF) = Configs::AdjustmentData();
+				Configs::adjustment = &Configs::adjustDataMap.at(0xFFFFFFFF).at(0xFFFFFFFF);
+			}
+			SyncValues();
+		}
+		this->shouldDraw = wantDraw;
+	}
+
+	void CopyToClipboard(const std::string& text)
+	{
+		OpenClipboard(0);
+		EmptyClipboard();
+		HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, text.size() + 1);
+		if (!hg) {
+			CloseClipboard();
+			return;
+		}
+		memcpy(GlobalLock(hg), text.c_str(), text.size() + 1);
+		GlobalUnlock(hg);
+		SetClipboardData(CF_TEXT, hg);
+		CloseClipboard();
+		GlobalFree(hg);
+	}
+
+	std::string GenerateJsonSnippet()
+	{
+		nlohmann::json jsonSnippet;
+
+		if (Configs::adjustment->translation.x != 0)
+			jsonSnippet["X"] = Configs::adjustment->translation.x;
+		if (Configs::adjustment->translation.y != 0)
+			jsonSnippet["Y"] = Configs::adjustment->translation.y;
+		if (Configs::adjustment->translation.z != 0)
+			jsonSnippet["Z"] = Configs::adjustment->translation.z;
+
+		if (Configs::adjustment->rotation.x != 0)
+			jsonSnippet["rotX"] = Configs::adjustment->rotation.x / Configs::toRad;
+		if (Configs::adjustment->rotation.y != 0)
+			jsonSnippet["rotY"] = Configs::adjustment->rotation.y / Configs::toRad;
+		if (Configs::adjustment->rotation.z != 0)
+			jsonSnippet["rotZ"] = Configs::adjustment->rotation.z / Configs::toRad;
+
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnReload))
+			jsonSnippet["RevertOnReload"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnReload);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnMelee))
+			jsonSnippet["RevertOnMelee"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnMelee);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnThrow))
+			jsonSnippet["RevertOnThrow"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnThrow);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnSprint))
+			jsonSnippet["RevertOnSprint"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnSprint);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnEquip))
+			jsonSnippet["RevertOnEquip"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnEquip);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnFastEquip))
+			jsonSnippet["RevertOnFastEquip"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnFastEquip);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnUnequip))
+			jsonSnippet["RevertOnUnequip"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnUnequip);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnGunDown))
+			jsonSnippet["RevertOnGunDown"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnGunDown);
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent))
+			jsonSnippet["Persistent"] = Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent);
+
+		std::string jsonString = jsonSnippet.dump(6);
+
+		if (jsonString.front() == '{' && jsonString.back() == '}') {
+			jsonString.erase(0, 1);
+			jsonString.erase(jsonString.size() - 1);
+		}
+
+		jsonString.erase(0, jsonString.find_first_not_of("\n\r\t"));
+		jsonString.erase(jsonString.find_last_not_of("\n\r\t ") + 1);
+
+		return jsonString;
+	}
+
+	void Window::Draw()
+	{
+		if (!this->shouldDraw) {
+			return;
+		}
+
+		ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+		ImVec2 size = ImGui::GetMainViewport()->Size;
+
+		ImGui::SetNextWindowSize(ImVec2(400, 850), ImGuiCond_FirstUseEver);
+
+		ImGuiWindowFlags window_flags = 0;
+		window_flags |= ImGuiWindowFlags_MenuBar;
+		ImGui::Begin("Quick Adjustment Editor", NULL, window_flags);
+		static const ImVec2 sz = ImVec2(-FLT_MIN, 0.0f);
+
+		ImGui::TextColored(ImVec4(0.f, 0.95f, 0.f, 1.f), "THIS IS ONLY FOR PREVIEW!\nEnter those values into json files.");
+
+		ImGui::SeparatorText("Hotkeys");
+
+		std::string hotkeyStr = editorHotkey.ToReadableString();
+
+		ImGui::Text("Editor Hotkey: %s", hotkeyStr.c_str());
+
+		if (editorHotkey.captureState == 0) {
+			if (ImGui::Button("Set Editor Hotkey")) {
+				editorHotkey.captureState = 1;
+			}
+		} else {
+			ImGui::Text("Press any key combination to set as the hotkey...");
+			Hotkey::CaptureHotkey(editorHotkey);
+		}
+
+		std::string altPosHotkeyStr = altPosHotkey.ToReadableString();
+
+		ImGui::Text("Alt Pos Hotkey: %s", altPosHotkeyStr.c_str());
+
+		if (altPosHotkey.captureState == 0) {
+			if (ImGui::Button("Set Alt Pos Hotkey")) {
+				altPosHotkey.captureState = 1;
+			}
+		} else {
+			ImGui::Text("Press any key combination to set as the hotkey...");
+			Hotkey::CaptureHotkey(altPosHotkey);
+		}
+
+		ImGui::SeparatorText("Adjustments");
+
+		if (ImGui::Button("Reload JSON files", sz)) {
+			Configs::LoadConfigs();
+
+			RE::BGSObjectInstance* objInstance = nullptr;
+			if (Globals::p && Globals::p->currentProcess) {
+				Globals::p->currentProcess->middleHigh->equippedItemsLock.lock();
+				RE::BSTArray<RE::EquippedItem>& equipped = Globals::p->currentProcess->middleHigh->equippedItems;
+				if (equipped.size() != 0 && equipped[0].data.get()) {
+					objInstance = &equipped[0].item;
+				}
+				Globals::p->currentProcess->middleHigh->equippedItemsLock.unlock();
+				if (objInstance) {
+					RE::BGSObjectInstance newObjInstance { objInstance->object, nullptr };
+					RE::ActorEquipManager::GetSingleton()->UnequipObject(Globals::p, objInstance, 1, 0, 0xFFFFFFFF, false, false, false, true, 0);
+					RE::ActorEquipManager::GetSingleton()->EquipObject(Globals::p, newObjInstance, 0, 1, 0, true, false, false, true, false);
+				}
+			}
+
+			SyncValues();
+			Hooks::shouldAdjust = true;
+		}
+
+		const static float minTrans = -200.f;
+		const static float maxTrans = 200.f;
+		if (ImGui::DragFloat("X", &tempX, 0.01f, minTrans, maxTrans, "%.2f")) {
+			Configs::adjustment->translation.x = tempX;
+		}
+
+		if (ImGui::DragFloat("Y", &tempY, 0.01f, minTrans, maxTrans, "%.2f")) {
+			Configs::adjustment->translation.y = tempY;
+		}
+
+		if (ImGui::DragFloat("Z", &tempZ, 0.01f, minTrans, maxTrans, "%.2f")) {
+			Configs::adjustment->translation.z = tempZ;
+		}
+
+		if (ImGui::DragFloat("rotX", &tempRotX, 0.01f, -180.f, 180.f, "%.2f")) {
+			Configs::adjustment->rotation.x = tempRotX * Configs::toRad;
+		}
+
+		if (ImGui::DragFloat("rotY", &tempRotY, 0.01f, -180.f, 180.f, "%.2f")) {
+			Configs::adjustment->rotation.y = tempRotY * Configs::toRad;
+		}
+
+		if (ImGui::DragFloat("rotZ", &tempRotZ, 0.01f, -180.f, 180.f, "%.2f")) {
+			Configs::adjustment->rotation.z = tempRotZ * Configs::toRad;
+		}
+
+		if (ImGui::BeginCombo("Revert Options", "Click here")) {
+			if (ImGui::Checkbox("Revert on reload", &tempRevertOnReload)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnReload, tempRevertOnReload);
+			}
+
+			if (ImGui::Checkbox("Revert on melee", &tempRevertOnMelee)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnMelee, tempRevertOnMelee);
+			}
+
+			if (ImGui::Checkbox("Revert on throw", &tempRevertOnThrow)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnThrow, tempRevertOnThrow);
+			}
+
+			if (ImGui::Checkbox("Revert on sprint", &tempRevertOnSprint)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnSprint, tempRevertOnSprint);
+			}
+
+			if (ImGui::Checkbox("Revert on equip", &tempRevertOnEquip)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnEquip, tempRevertOnEquip);
+			}
+
+			if (ImGui::Checkbox("Revert on fast equip", &tempRevertOnFastEquip)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnFastEquip, tempRevertOnFastEquip);
+			}
+
+			if (ImGui::Checkbox("Revert on unequip", &tempRevertOnUnequip)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnUnequip, tempRevertOnUnequip);
+			}
+
+			if (ImGui::Checkbox("Revert on gun down", &tempRevertOnGunDown)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnGunDown, tempRevertOnGunDown);
+			}
+			
+			ImGui::Separator();
+			
+			if (ImGui::Checkbox("Persistent (Bodycam Mode)", &tempPersistent)) {
+				Configs::adjustment->SetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent, tempPersistent);
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("When enabled, weapon position stays fixed during all animations (reload, sprint, melee, etc.) except zoom.");
+			}
+			
+			ImGui::EndCombo();
+		}
+
+		ImGui::SeparatorText("Quality of Life");
+		static bool showMessage = false;
+		static auto messageTime = std::chrono::steady_clock::now();
+		if (ImGui::Button("Generate JSON Snippet", sz)) {
+			std::string jsonSnippet = GenerateJsonSnippet();
+			CopyToClipboard(jsonSnippet);
+			showMessage = true;
+			messageTime = std::chrono::steady_clock::now();
+		}
+
+		if (showMessage) {
+			ImGui::TextColored(ImVec4(0.f, 0.95f, 0.f, 1.f), "JSON snippet copied to clipboard!");
+
+			auto now = std::chrono::steady_clock::now();
+			if (std::chrono::duration_cast<std::chrono::seconds>(now - messageTime).count() > 2) {
+				showMessage = false;
+			}
+		}
+
+		ImGui::SeparatorText("Debug");
+		if (Globals::p)
+			ImGui::TextColored(ImVec4(0.95f, 0.f, 0.f, 1.f), "currentTime %.2f duration %.2f easePercentage %.2f\nGunState %d WeaponState %d\nClip Name %s", currentTime, duration, easePercentage, Globals::p->gunState, Globals::p->weaponState, clipName.c_str());
+		ImGui::SeparatorText("Animation");
+		if (Globals::p)
+			ImGui::TextColored(ImVec4(0.95f, 0.f, 0.f, 1.f), "%s", animationInfo.c_str());
+
+		ImGui::End();
+	}
+}
