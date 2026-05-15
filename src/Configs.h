@@ -18,7 +18,8 @@ namespace Configs
 		kRevertOnFastEquip = 6,
 		kRevertOnUnequip = 7,
 		kRevertOnGunDown = 8,
-		kNumFlags = 9
+		kPersistent = 9,        // 추가: 영구 고정 모드 (Bodycam 스타일)
+		kNumFlags = 10          // 9에서 10으로 변경
 	};
 
 	struct AlternativeAdjustment
