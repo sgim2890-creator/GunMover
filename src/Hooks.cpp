@@ -45,37 +45,36 @@ namespace RE
 	{
 		struct NodeData
 		{
-			hkbClipGenerator* clipGenerator;   // 00
-			hkbClipGenerator* clipGenerator2;  // 08
-			hkbBehaviorGraph* behaviorGraph;   // 10
+			hkbClipGenerator* clipGenerator;
+			hkbClipGenerator* clipGenerator2;
+			hkbBehaviorGraph* behaviorGraph;
 		};
 
-		// members
-		std::uint64_t unk00[0xE0 >> 3];            // 000
-		hkArray<NodeData*>* activeNodes;           // 0E0
-		std::uint64_t unkE8[(0x1A8 - 0xE8) >> 3];  // 0E8
-		std::uint8_t unk1A8;                       // 1A8
-		std::uint8_t unk1A9;                       // 1A9
-		bool isActive;                             // 1AA
-		bool isLinked;                             // 1AB
-		bool updateActiveNodes;                    // 1AC
-		bool stateOrTransitionChanged;             // 1AD
+		std::uint64_t unk00[0xE0 >> 3];
+		hkArray<NodeData*>* activeNodes;
+		std::uint64_t unkE8[(0x1A8 - 0xE8) >> 3];
+		std::uint8_t unk1A8;
+		std::uint8_t unk1A9;
+		bool isActive;
+		bool isLinked;
+		bool updateActiveNodes;
+		bool stateOrTransitionChanged;
 	};
 
 	class hkbClipGenerator
 	{
 	public:
-		// members
-		std::uint64_t unk00[0x38 >> 3];           // 00
-		const char* animName;                     // 38
-		std::uint32_t id;						  // 40
-		std::uint8_t cloneState;                  // 42
-		std::uint8_t pad43;                       // 43
-		std::uint32_t pad44;                      // 44
-		std::uint64_t unk40[(0x90 - 0x48) >> 3];  // 40
-		const char* animPath;                     // 90
+		std::uint64_t unk00[0x38 >> 3];
+		const char* animName;
+		std::uint32_t id;
+		std::uint8_t cloneState;
+		std::uint8_t pad43;
+		std::uint32_t pad44;
+		std::uint64_t unk40[(0x90 - 0x48) >> 3];
+		const char* animPath;
 	};
 }
+
 void GetClipInfo(float& _currentTime, float& _duration, std::string& _clipName) {
 	if (Globals::p->currentProcess) {
 		RE::BSAnimationGraphManager* graphManager = Globals::p->currentProcess->middleHigh->animationGraphManager.get();
@@ -103,6 +102,7 @@ void GetClipInfo(float& _currentTime, float& _duration, std::string& _clipName) 
 		}
 	}
 }
+
 void GetAllClipInfo(std::string& clipInfo)
 {
 	if (Globals::p->currentProcess) {
@@ -172,19 +172,33 @@ void Hooks::HookedSet1stPersonCameraLocation(RE::NiPoint3& a_loc)
 			animationInfo.clear();
 			GetAllClipInfo(animationInfo);
 		}
-		if (MenuWatcher::GetSingleton()->isInPipboyMenu || 
-			(Globals::p->currentProcess && Globals::p->currentProcess->middleHigh->weaponCullCounter > 0) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnReload) && Globals::p->gunState == RE::GUN_STATE::kReloading && (duration - currentTime) >= duration / 3.f) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnMelee) && (Globals::p->meleeAttackState & 0x2) && (duration - currentTime) >= duration / 2.5f) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnThrow) && Globals::p->gunState == RE::GUN_STATE::kFire && (clipName == "WPNGrenadeThrow" || clipName == "WPNMineThrow") && (duration - currentTime) >= duration / 3.f) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnSprint) && (Globals::p->moveMode & 0x100) == 0x100) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnEquip) && clipName == "WPNEquip" && (duration - currentTime) >= duration / 3.f) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnFastEquip) && clipName == "WPNEquipFast" && (duration - currentTime) >= duration / 2.f) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnUnequip) && Globals::p->weaponState == RE::WEAPON_STATE::kSheathing) ||
-			(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnGunDown) && Globals::p->gunState == RE::GUN_STATE::kBlocked)) {
-			transitionTimer = min(transitionDelay, transitionTimer + deltaTime);
+
+		// 수정된 부분: Persistent 모드 체크
+		// Persistent가 true면 모든 revert 조건을 무시하고 항상 전체 적용 상태 유지
+		if (Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kPersistent)) {
+			// Persistent 모드: transitionTimer를 강제로 0으로 유지하여 easePercentage = 1.0 유지
+			// 다만 줌인(zoom)은 여전히 적용되어야 하므로 zoomPercentage는 체크
+			if (zoomPercentage > 0.f) {
+				transitionTimer = min(transitionDelay, transitionTimer + deltaTime);
+			} else {
+				transitionTimer = max(0.f, transitionTimer - deltaTime);
+			}
 		} else {
-			transitionTimer = max(0.f, transitionTimer - deltaTime);
+			// 기존 리버트 로직 (원본 그대로)
+			if (MenuWatcher::GetSingleton()->isInPipboyMenu || 
+				(Globals::p->currentProcess && Globals::p->currentProcess->middleHigh->weaponCullCounter > 0) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnReload) && Globals::p->gunState == RE::GUN_STATE::kReloading && (duration - currentTime) >= duration / 3.f) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnMelee) && (Globals::p->meleeAttackState & 0x2) && (duration - currentTime) >= duration / 2.5f) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnThrow) && Globals::p->gunState == RE::GUN_STATE::kFire && (clipName == "WPNGrenadeThrow" || clipName == "WPNMineThrow") && (duration - currentTime) >= duration / 3.f) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnSprint) && (Globals::p->moveMode & 0x100) == 0x100) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnEquip) && clipName == "WPNEquip" && (duration - currentTime) >= duration / 3.f) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnFastEquip) && clipName == "WPNEquipFast" && (duration - currentTime) >= duration / 2.f) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnUnequip) && Globals::p->weaponState == RE::WEAPON_STATE::kSheathing) ||
+				(Configs::adjustment->GetAdjustmentFlag(Configs::REVERT_FLAG::kRevertOnGunDown) && Globals::p->gunState == RE::GUN_STATE::kBlocked)) {
+				transitionTimer = min(transitionDelay, transitionTimer + deltaTime);
+			} else {
+				transitionTimer = max(0.f, transitionTimer - deltaTime);
+			}
 		}
 
 		float adjustPercentage = 0.f;
@@ -246,3 +260,4 @@ void Hooks::HookedPosition3D(RE::MuzzleFlash* a_muz, RE::TESObjectREFR* a_ref, b
 		}
 	}
 }
+
